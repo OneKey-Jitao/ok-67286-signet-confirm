@@ -148,6 +148,25 @@
         </div>
         <div id="signStatus" class="status warn">确认页还没有打开。</div>
       </section>
+
+      <section>
+        <h2>5. 回归向量（粘贴 PSBT）</h2>
+        <p>
+          把 <code>build-signet-psbt-vectors.js</code> 生成的 <code>psbtHex</code> 粘进来，直接转发给
+          <code>signPsbt</code>。REJECT 向量应返回 <code>-32602</code>、不弹确认页；DISPLAY 向量应弹出确认页，核对后点取消。全程未签名，不广播。
+        </p>
+        <div id="rawGuard" class="status stop">先连接钱包，并通过网络 / 账户核对。</div>
+        <label for="rawPsbt">psbtHex</label>
+        <textarea id="rawPsbt" autocomplete="off" spellcheck="false" placeholder="70736274ff..."></textarea>
+        <label for="rawOptions">options（可选，JSON；dupIndex 向量需要）</label>
+        <input id="rawOptions" autocomplete="off" spellcheck="false" placeholder='{"toSignInputs":[{"index":0},{"index":"0"}]}' />
+        <div class="row">
+          <button id="rawDecode" class="secondary" type="button">只解码（不发给钱包）</button>
+          <button id="rawSend" type="button" disabled>发送给 signPsbt</button>
+        </div>
+        <div id="rawStatus" class="status warn">还没有发送。</div>
+        <pre id="rawDecoded" class="mono" style="white-space: pre-wrap; margin: 10px 0 0;"></pre>
+      </section>
     </main>
     <script src="./psbt.js"></script>
     <script>
@@ -398,6 +417,113 @@
           setStatus('signStatus', 'ok', '确认页已关闭，没有返回已签名 PSBT。\n' + (code !== undefined ? 'code ' + code + '\n' : '') + (error && error.message ? error.message : String(error)));
         }
       });
+
+      function ownedScriptHex() {
+        if (!connectedAccount) return '';
+        try {
+          return Ok67286Psbt.toHex(Ok67286Psbt.outputScript(connectedAccount));
+        } catch (error) {
+          return '';
+        }
+      }
+
+      function refreshRawGuard() {
+        const guard = $('rawGuard');
+        const okToSend = provider() && connectedNetwork === 'signet' && connectedAccount;
+        if (okToSend) {
+          guard.className = 'status ok';
+          guard.textContent = '已连接 signet，账户 ' + connectedAccount + '。可以发送向量。';
+        } else {
+          guard.className = 'status stop';
+          guard.textContent = '先连接钱包，并通过网络 / 账户核对。';
+        }
+        $('rawSend').disabled = !okToSend;
+      }
+
+      function renderRawDecode() {
+        const hex = $('rawPsbt').value.trim();
+        if (!hex) {
+          $('rawDecoded').textContent = '';
+          return null;
+        }
+        try {
+          const decoded = Ok67286Psbt.decodePsbt(hex);
+          const owned = ownedScriptHex();
+          const lines = [];
+          decoded.inputs.forEach((input, i) => {
+            lines.push('输入 ' + i + '  sighash ' + Ok67286Psbt.sighashName(input.sighashType));
+          });
+          decoded.outputs.forEach((output, i) => {
+            const mine = owned && output.scriptHex === owned;
+            lines.push(
+              '输出 ' + i + '  ' + output.value + ' sat  ' + (mine ? '[本账户]' : '[外部]') + '  ' + output.scriptHex,
+            );
+          });
+          $('rawDecoded').textContent = lines.join('\n');
+          return decoded;
+        } catch (error) {
+          $('rawDecoded').textContent = '解码失败：' + (error.message || error);
+          return null;
+        }
+      }
+
+      $('rawPsbt').addEventListener('input', renderRawDecode);
+      $('rawDecode').addEventListener('click', () => {
+        readConnection().catch(() => {}).finally(() => {
+          refreshRawGuard();
+          renderRawDecode();
+        });
+      });
+
+      $('rawSend').addEventListener('click', async () => {
+        const ok = await readConnection().catch((error) => {
+          setStatus('rawStatus', 'stop', error.message || String(error));
+          return false;
+        });
+        refreshRawGuard();
+        if (!ok) return;
+        const hex = $('rawPsbt').value.trim();
+        if (!hex) {
+          setStatus('rawStatus', 'stop', '先粘贴 psbtHex。');
+          return;
+        }
+        renderRawDecode();
+        let options;
+        const optionsText = $('rawOptions').value.trim();
+        if (optionsText) {
+          try {
+            options = JSON.parse(optionsText);
+          } catch (error) {
+            setStatus('rawStatus', 'stop', 'options 不是合法 JSON：' + (error.message || error));
+            return;
+          }
+        }
+        const btc = provider();
+        setStatus('rawStatus', 'warn', '已发送给 signPsbt。REJECT 向量应返回 -32602；DISPLAY 向量会弹确认页，核对后点取消。');
+        try {
+          const signed = typeof btc.signPsbt === 'function'
+            ? await btc.signPsbt(hex, options)
+            : await btc.request({ method: 'signPsbt', params: { psbtHex: hex, options } });
+          const text = typeof signed === 'string' ? signed : JSON.stringify(signed);
+          if (text && text !== 'null' && text !== 'undefined') {
+            setStatus('rawStatus', 'stop', '钱包返回了结果。REJECT 向量不应走到这里；DISPLAY 向量请点取消而不是确认。页面不广播。\n\n' + text);
+          } else {
+            setStatus('rawStatus', 'ok', '没有返回已签名 PSBT。');
+          }
+        } catch (error) {
+          const code = error && (error.code || (error.data && error.data.code));
+          const label = code === -32602 ? '返回 -32602（invalidParams）——这正是 REJECT 向量的预期。\n' : '';
+          setStatus('rawStatus', 'ok', label + (code !== undefined ? 'code ' + code + '\n' : '') + (error && error.message ? error.message : String(error)));
+        }
+      });
+
+      const originalReadConnection = readConnection;
+      readConnection = async function () {
+        const result = await originalReadConnection.apply(this, arguments);
+        refreshRawGuard();
+        return result;
+      };
+      refreshRawGuard();
     </script>
   </body>
 </html>

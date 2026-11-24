@@ -266,6 +266,135 @@
     };
   }
 
+  function hexToBytes(hex) {
+    const clean = String(hex).trim().replace(/\s+/g, '').toLowerCase();
+    if (clean.length % 2 !== 0 || /[^0-9a-f]/.test(clean)) {
+      throw new Error('PSBT 不是合法的十六进制');
+    }
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < out.length; i += 1) {
+      out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  function makeReader(bytes) {
+    let offset = 0;
+    return {
+      remaining: () => bytes.length - offset,
+      readByte() {
+        if (offset >= bytes.length) throw new Error('PSBT 数据提前结束');
+        const b = bytes[offset];
+        offset += 1;
+        return b;
+      },
+      read(n) {
+        if (offset + n > bytes.length) throw new Error('PSBT 数据提前结束');
+        const slice = bytes.slice(offset, offset + n);
+        offset += n;
+        return slice;
+      },
+      readVarint() {
+        const first = this.readByte();
+        if (first < 0xfd) return first;
+        if (first === 0xfd) {
+          const b = this.read(2);
+          return b[0] | (b[1] << 8);
+        }
+        if (first === 0xfe) {
+          const b = this.read(4);
+          return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] * 0x1000000)) >>> 0;
+        }
+        const b = this.read(8);
+        let v = 0n;
+        for (let i = 7; i >= 0; i -= 1) v = (v << 8n) | BigInt(b[i]);
+        return Number(v);
+      },
+      readU32le() {
+        const b = this.read(4);
+        return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] * 0x1000000)) >>> 0;
+      },
+      readU64le() {
+        const b = this.read(8);
+        let v = 0n;
+        for (let i = 7; i >= 0; i -= 1) v = (v << 8n) | BigInt(b[i]);
+        return v;
+      },
+    };
+  }
+
+  function parseUnsignedTx(bytes) {
+    const r = makeReader(bytes);
+    r.readU32le(); // version
+    const inputCount = r.readVarint();
+    for (let i = 0; i < inputCount; i += 1) {
+      r.read(32);
+      r.readU32le();
+      const scriptLen = r.readVarint();
+      r.read(scriptLen);
+      r.readU32le();
+    }
+    const outputCount = r.readVarint();
+    const outputs = [];
+    for (let i = 0; i < outputCount; i += 1) {
+      const value = r.readU64le();
+      const scriptLen = r.readVarint();
+      const script = r.read(scriptLen);
+      outputs.push({ value: value.toString(), scriptHex: toHex(script) });
+    }
+    return { inputCount, outputs };
+  }
+
+  function decodePsbt(hex) {
+    const bytes = hexToBytes(hex);
+    const magic = [0x70, 0x73, 0x62, 0x74, 0xff];
+    for (let i = 0; i < magic.length; i += 1) {
+      if (bytes[i] !== magic[i]) throw new Error('不是 PSBT（magic 不匹配）');
+    }
+    const r = makeReader(bytes.slice(magic.length));
+    let unsignedTx = null;
+    for (;;) {
+      const keyLen = r.readVarint();
+      if (keyLen === 0) break;
+      const key = r.read(keyLen);
+      const valLen = r.readVarint();
+      const val = r.read(valLen);
+      if (key[0] === 0x00) unsignedTx = val;
+    }
+    if (!unsignedTx) throw new Error('PSBT 缺少 unsigned tx');
+    const tx = parseUnsignedTx(unsignedTx);
+    const inputs = [];
+    for (let i = 0; i < tx.inputCount; i += 1) {
+      let sighashType;
+      for (;;) {
+        const keyLen = r.readVarint();
+        if (keyLen === 0) break;
+        const key = r.read(keyLen);
+        const valLen = r.readVarint();
+        const val = r.read(valLen);
+        if (key[0] === 0x03 && val.length === 4) {
+          sighashType = (val[0] | (val[1] << 8) | (val[2] << 16) | (val[3] * 0x1000000)) >>> 0;
+        }
+      }
+      inputs.push({ sighashType });
+    }
+    return { inputs, outputs: tx.outputs };
+  }
+
+  function sighashName(type) {
+    if (type === undefined) return 'DEFAULT（未声明，按 ALL）';
+    const map = {
+      0x01: 'ALL',
+      0x02: 'NONE',
+      0x03: 'SINGLE',
+      0x81: 'ALL|ANYONECANPAY',
+      0x82: 'NONE|ANYONECANPAY',
+      0x83: 'SINGLE|ANYONECANPAY',
+    };
+    const name = map[type] || '未知';
+    return '0x' + type.toString(16) + '（' + name + '）';
+  }
+
   return {
     DUST_SATS,
     SIGHASH_ALL,
@@ -273,6 +402,8 @@
     isTaprootAddress,
     outputScript,
     buildPaymentPsbt,
+    decodePsbt,
+    sighashName,
     toHex,
   };
 });
