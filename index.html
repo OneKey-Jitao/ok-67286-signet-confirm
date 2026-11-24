@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OK-67286 Signet PSBT 确认页</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1c1917;
+        --muted: #57534e;
+        --line: #e7e5e4;
+        --paper: #fafaf9;
+        --stop: #9f1239;
+        --ok: #166534;
+        --warn: #92400e;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 16px/1.5 "Iowan Old Style", Palatino, "Palatino Linotype", serif;
+        color: var(--ink);
+        background: var(--paper);
+      }
+      main { max-width: 720px; margin: 0 auto; padding: 28px 20px 64px; }
+      h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; }
+      h2 { font-size: 18px; margin: 28px 0 10px; }
+      p { margin: 8px 0; }
+      .lead { color: var(--muted); margin-bottom: 20px; }
+      section {
+        border: 1px solid var(--line);
+        background: white;
+        padding: 16px;
+        margin-top: 14px;
+      }
+      label { display: block; font-size: 14px; margin: 12px 0 4px; }
+      input, select, button, textarea {
+        font: 15px/1.4 ui-sans-serif, system-ui, sans-serif;
+      }
+      input, select, textarea {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #d6d3d1;
+        background: white;
+        color: var(--ink);
+      }
+      textarea { min-height: 88px; resize: vertical; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      button {
+        padding: 8px 14px;
+        border: 1px solid #1c1917;
+        background: #1c1917;
+        color: white;
+        cursor: pointer;
+      }
+      button.secondary { background: white; color: #1c1917; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .status { padding: 10px 12px; margin-top: 12px; white-space: pre-wrap; }
+      .status.stop { background: #fff1f2; color: var(--stop); }
+      .status.ok { background: #f0fdf4; color: var(--ok); }
+      .status.warn { background: #fffbeb; color: var(--warn); }
+      table { width: 100%; border-collapse: collapse; font-size: 15px; }
+      th, td { text-align: left; vertical-align: top; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); }
+      th { width: 8.5em; color: var(--muted); font-weight: 600; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+      ol { margin: 8px 0 0; padding-left: 1.2em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OK-67286 Signet 确认页</h1>
+      <p class="lead">
+        普通未签名的 SIGHASH_ALL PSBT。连接后先核对网络和账户，再手动打开确认页。这个页面没有广播。
+      </p>
+      <ol>
+        <li>用 OneKey 6.7.0 / JS Bundle 27576860 打开本页。扩展、桌面内置浏览器、App 内置浏览器都会注入 <code>window.unisat</code>。</li>
+        <li>填写预期的 Signet Taproot 测试账户，以及另一个 Signet 收款地址。</li>
+        <li>连接钱包。网络不是 signet，或账户不是预期地址，就停在这里。</li>
+        <li>选一笔该账户的 UTXO，生成 PSBT，对照下面的收款地址、金额和找零。</li>
+        <li>点「打开确认页」。核对小额外部收款的地址和金额完整显示，找零不计入对外转出。然后点取消。</li>
+      </ol>
+
+      <section>
+        <h2>1. 预期账户和收款地址</h2>
+        <label for="expected">预期测试账户（tb1p）</label>
+        <input id="expected" autocomplete="off" spellcheck="false" placeholder="tb1p..." />
+        <label for="receive">独立 Signet 收款地址（tb1p 或 tb1q，不能是上面的账户）</label>
+        <input id="receive" autocomplete="off" spellcheck="false" placeholder="tb1..." />
+        <label for="version">本次客户端版本（截图时填写）</label>
+        <input id="version" placeholder="6.7.0" />
+        <label for="bundle">JS Bundle（截图时填写）</label>
+        <input id="bundle" placeholder="27576860" />
+      </section>
+
+      <section>
+        <h2>2. 连接</h2>
+        <div class="row">
+          <button id="connect" type="button">连接钱包</button>
+          <button id="recheck" class="secondary" type="button">重新核对网络和账户</button>
+        </div>
+        <div id="connectStatus" class="status warn">还没有连接。</div>
+        <table>
+          <tr><th>Provider</th><td id="providerCell">—</td></tr>
+          <tr><th>getNetwork()</th><td id="networkCell">—</td></tr>
+          <tr><th>已连接账户</th><td id="accountCell">—</td></tr>
+          <tr><th>钱包信息</th><td id="walletInfoCell">—</td></tr>
+        </table>
+      </section>
+
+      <section>
+        <h2>3. 未花费输出</h2>
+        <p>只使用当前连接账户的 UTXO。输入和找零都回到这个 Taproot 地址。</p>
+        <div class="row">
+          <button id="loadUtxo" class="secondary" type="button">从 mempool.space/signet 读取</button>
+        </div>
+        <label for="utxoPick">读取到的 UTXO</label>
+        <select id="utxoPick"><option value="">手动填写下面三项</option></select>
+        <label for="txid">txid</label>
+        <input id="txid" autocomplete="off" spellcheck="false" />
+        <label for="vout">vout</label>
+        <input id="vout" inputmode="numeric" value="0" />
+        <label for="inputValue">该输出金额（sat）</label>
+        <input id="inputValue" inputmode="numeric" />
+        <label for="sendValue">外部收款金额（sat）</label>
+        <input id="sendValue" inputmode="numeric" value="1000" />
+        <label for="fee">手续费（sat）</label>
+        <input id="fee" inputmode="numeric" value="400" />
+        <div class="row">
+          <button id="build" type="button">生成并解码 PSBT</button>
+        </div>
+        <div id="buildStatus" class="status warn">还没有生成。</div>
+        <table id="decodeTable" hidden>
+          <tr><th>Sighash</th><td>SIGHASH_ALL（0x01），两笔输出都已承诺</td></tr>
+          <tr><th>输入</th><td id="inCell" class="mono"></td></tr>
+          <tr><th>对外收款</th><td id="outCell" class="mono"></td></tr>
+          <tr><th>找零</th><td id="changeCell" class="mono"></td></tr>
+          <tr><th>手续费</th><td id="feeCell"></td></tr>
+        </table>
+        <label for="psbtHex">未签名 PSBT</label>
+        <textarea id="psbtHex" readonly></textarea>
+      </section>
+
+      <section>
+        <h2>4. 打开确认页</h2>
+        <p>只调用 <code>unisat.signPsbt</code>。页面没有 <code>pushTx</code> / <code>pushPsbt</code>。请在钱包里点取消。</p>
+        <div class="row">
+          <button id="openConfirm" type="button" disabled>打开确认页</button>
+        </div>
+        <div id="signStatus" class="status warn">确认页还没有打开。</div>
+      </section>
+    </main>
+    <script src="./psbt.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const expectedInput = $('expected');
+      const receiveInput = $('receive');
+      let ready = null;
+      let connectedAccount = '';
+      let connectedNetwork = '';
+
+      expectedInput.value = localStorage.getItem('ok67286.expected') || '';
+      receiveInput.value = localStorage.getItem('ok67286.receive') || '';
+      expectedInput.addEventListener('change', () => {
+        localStorage.setItem('ok67286.expected', expectedInput.value.trim());
+        invalidate();
+      });
+      receiveInput.addEventListener('change', () => {
+        localStorage.setItem('ok67286.receive', receiveInput.value.trim());
+        invalidate();
+      });
+      ['txid', 'vout', 'inputValue', 'sendValue', 'fee'].forEach((id) => {
+        $(id).addEventListener('input', invalidate);
+      });
+
+      function setStatus(id, kind, text) {
+        const el = $(id);
+        el.className = 'status ' + kind;
+        el.textContent = text;
+      }
+
+      function provider() {
+        return window.unisat || null;
+      }
+
+      function invalidate() {
+        ready = null;
+        $('openConfirm').disabled = true;
+        $('decodeTable').hidden = true;
+        $('psbtHex').value = '';
+      }
+
+      function sameAddress(a, b) {
+        return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+      }
+
+      function walletInfoText() {
+        try {
+          const info = window.$onekey && window.$onekey.$walletInfo;
+          if (!info) return '页面上没有 window.$onekey.$walletInfo';
+          return JSON.stringify(info);
+        } catch (error) {
+          return String(error && error.message ? error.message : error);
+        }
+      }
+
+      async function readConnection() {
+        const btc = provider();
+        $('providerCell').textContent = btc ? 'window.unisat' : '未注入';
+        $('walletInfoCell').textContent = walletInfoText();
+        if (!btc) {
+          connectedAccount = '';
+          connectedNetwork = '';
+          $('networkCell').textContent = '—';
+          $('accountCell').textContent = '—';
+          setStatus('connectStatus', 'stop', '这个页面没有 window.unisat。请用 OneKey 扩展、桌面内置浏览器或 App 内置浏览器打开 https 页面。');
+          invalidate();
+          return false;
+        }
+        const network = await btc.getNetwork();
+        const accounts = await btc.getAccounts();
+        connectedNetwork = String(network || '');
+        connectedAccount = Array.isArray(accounts) && accounts.length ? String(accounts[0]) : '';
+        $('networkCell').textContent = connectedNetwork || '（空）';
+        $('accountCell').textContent = connectedAccount || '（空）';
+        const expected = expectedInput.value.trim();
+        if (connectedNetwork !== 'signet') {
+          setStatus('connectStatus', 'stop', 'getNetwork() 返回的是「' + connectedNetwork + '」，不是 signet。已停止，不会打开确认页。');
+          invalidate();
+          return false;
+        }
+        if (!expected) {
+          setStatus('connectStatus', 'stop', '先填写预期测试账户。');
+          invalidate();
+          return false;
+        }
+        if (!sameAddress(connectedAccount, expected)) {
+          setStatus('connectStatus', 'stop', '已连接账户和预期测试账户不一致。已停止，不会打开确认页。\n已连接：' + connectedAccount + '\n预期：' + expected);
+          invalidate();
+          return false;
+        }
+        let taproot = false;
+        try {
+          taproot = Ok67286Psbt.isTaprootAddress(connectedAccount);
+        } catch (error) {
+          setStatus('connectStatus', 'stop', error.message);
+          invalidate();
+          return false;
+        }
+        if (!taproot) {
+          setStatus('connectStatus', 'stop', '已连接账户不是 Taproot（tb1p）。已停止。');
+          invalidate();
+          return false;
+        }
+        setStatus('connectStatus', 'ok', '网络是 signet，账户与预期测试账户一致。可以生成 PSBT。确认页仍要手动打开。');
+        return true;
+      }
+
+      $('connect').addEventListener('click', async () => {
+        const btc = provider();
+        if (!btc) {
+          await readConnection();
+          return;
+        }
+        try {
+          await btc.requestAccounts();
+          await readConnection();
+        } catch (error) {
+          setStatus('connectStatus', 'stop', error && error.message ? error.message : String(error));
+          invalidate();
+        }
+      });
+      $('recheck').addEventListener('click', () => {
+        readConnection().catch((error) => {
+          setStatus('connectStatus', 'stop', error && error.message ? error.message : String(error));
+          invalidate();
+        });
+      });
+
+      $('loadUtxo').addEventListener('click', async () => {
+        const ok = await readConnection().catch((error) => {
+          setStatus('buildStatus', 'stop', error.message || String(error));
+          return false;
+        });
+        if (!ok) return;
+        setStatus('buildStatus', 'warn', '正在读取 Signet UTXO…');
+        try {
+          const response = await fetch('https://mempool.space/signet/api/address/' + encodeURIComponent(connectedAccount) + '/utxo');
+          if (!response.ok) throw new Error('mempool.space 返回 ' + response.status);
+          const list = await response.json();
+          const select = $('utxoPick');
+          select.innerHTML = '<option value="">手动填写下面三项</option>';
+          if (!Array.isArray(list) || !list.length) {
+            setStatus('buildStatus', 'warn', '这个地址在 Signet 上没有 UTXO。先给测试账户领测试币，或手动填写 txid:vout。');
+            return;
+          }
+          list.forEach((utxo, index) => {
+            const option = document.createElement('option');
+            option.value = String(index);
+            option.textContent = utxo.txid + ':' + utxo.vout + '  ' + utxo.value + ' sat';
+            option.dataset.txid = utxo.txid;
+            option.dataset.vout = String(utxo.vout);
+            option.dataset.value = String(utxo.value);
+            select.appendChild(option);
+          });
+          setStatus('buildStatus', 'ok', '读到 ' + list.length + ' 笔 UTXO。选一笔后再生成。');
+        } catch (error) {
+          setStatus('buildStatus', 'warn', '读取失败：' + (error.message || error) + '\n可以手动填写 txid、vout 和金额。');
+        }
+      });
+
+      $('utxoPick').addEventListener('change', () => {
+        const option = $('utxoPick').selectedOptions[0];
+        if (!option || !option.dataset.txid) return;
+        $('txid').value = option.dataset.txid;
+        $('vout').value = option.dataset.vout;
+        $('inputValue').value = option.dataset.value;
+        invalidate();
+      });
+
+      $('build').addEventListener('click', async () => {
+        const ok = await readConnection().catch((error) => {
+          setStatus('buildStatus', 'stop', error.message || String(error));
+          return false;
+        });
+        if (!ok) return;
+        try {
+          const decoded = Ok67286Psbt.buildPaymentPsbt({
+            accountAddress: connectedAccount,
+            receiveAddress: receiveInput.value,
+            txid: $('txid').value,
+            vout: $('vout').value,
+            inputValue: $('inputValue').value,
+            sendValue: $('sendValue').value,
+            fee: $('fee').value,
+          });
+          ready = decoded;
+          $('inCell').textContent = decoded.input.txid + ':' + decoded.input.vout + '  ' + decoded.input.value + ' sat';
+          $('outCell').textContent = decoded.external.address + '  ' + decoded.external.value + ' sat';
+          $('changeCell').textContent = decoded.change.address + '  ' + decoded.change.value + ' sat（找零，不应计入对外转出）';
+          $('feeCell').textContent = decoded.fee + ' sat';
+          $('psbtHex').value = decoded.psbtHex;
+          $('decodeTable').hidden = false;
+          $('openConfirm').disabled = false;
+          setStatus('buildStatus', 'ok', '已在本地解码。打开确认页之前，先对照对外收款地址、金额和找零。');
+          setStatus('signStatus', 'warn', '确认页还没有打开。');
+        } catch (error) {
+          invalidate();
+          setStatus('buildStatus', 'stop', error.message || String(error));
+        }
+      });
+
+      $('openConfirm').addEventListener('click', async () => {
+        if (!ready) return;
+        const ok = await readConnection().catch((error) => {
+          setStatus('signStatus', 'stop', error.message || String(error));
+          return false;
+        });
+        if (!ok) return;
+        let current;
+        try {
+          current = Ok67286Psbt.buildPaymentPsbt({
+            accountAddress: connectedAccount,
+            receiveAddress: receiveInput.value,
+            txid: $('txid').value,
+            vout: $('vout').value,
+            inputValue: $('inputValue').value,
+            sendValue: $('sendValue').value,
+            fee: $('fee').value,
+          });
+        } catch (error) {
+          setStatus('signStatus', 'stop', error.message || String(error));
+          invalidate();
+          return;
+        }
+        if (current.psbtHex !== ready.psbtHex) {
+          setStatus('signStatus', 'stop', '输入已经变了。请重新生成并对照解码结果。');
+          invalidate();
+          return;
+        }
+        const btc = provider();
+        setStatus('signStatus', 'warn', '正在打开确认页。请核对后点取消。');
+        try {
+          const options = { autoFinalized: false };
+          const signed = typeof btc.signPsbt === 'function'
+            ? await btc.signPsbt(ready.psbtHex, options)
+            : await btc.request({
+                method: 'signPsbt',
+                params: { psbtHex: ready.psbtHex, options },
+              });
+          const text = typeof signed === 'string' ? signed : JSON.stringify(signed);
+          if (text && text !== 'null' && text !== 'undefined') {
+            setStatus('signStatus', 'stop', '钱包返回了结果。这个用例期望你点取消，所以不应拿到已签名 PSBT。页面没有广播。\n\n' + text);
+          } else {
+            setStatus('signStatus', 'ok', '没有返回已签名 PSBT。');
+          }
+        } catch (error) {
+          const code = error && (error.code || error.data && error.data.code);
+          setStatus('signStatus', 'ok', '确认页已关闭，没有返回已签名 PSBT。\n' + (code !== undefined ? 'code ' + code + '\n' : '') + (error && error.message ? error.message : String(error)));
+        }
+      });
+    </script>
+  </body>
+</html>
